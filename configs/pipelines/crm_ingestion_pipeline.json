@@ -1,0 +1,167 @@
+{
+    "pipeline_id": "crm_ingestion_daily",
+    "pipeline_name": "CRM Daily Data Ingestion",
+    "description": "Daily ingestion of CRM data from ZIP files to raw layer",
+    "layer": "raw",
+    "source_type": "crm",
+    "steps": [
+        {
+            "step_id": "validate_files",
+            "step_name": "Validate Source Files",
+            "step_type": "validate",
+            "depends_on": [],
+            "dependencies": [
+                {
+                    "dependency_id": "crm_files_arrival",
+                    "dependency_type": "file_arrival",
+                    "source": "/data/landing/crm/crm_*.zip",
+                    "timeout_minutes": 120,
+                    "retry_count": 3,
+                    "retry_delay_minutes": 10,
+                    "parameters": {
+                        "min_files": 1,
+                        "max_age_hours": 24
+                    }
+                }
+            ],
+            "executor_class": "src.ingestion.file_extractor.ZipFileValidator",
+            "parameters": {
+                "expected_files": [
+                    "customers.csv",
+                    "orders.csv",
+                    "products.csv"
+                ],
+                "validate_structure": true
+            },
+            "retry_count": 2,
+            "retry_delay_minutes": 5,
+            "sla_minutes": 30,
+            "alert_on_failure": true
+        },
+        {
+            "step_id": "extract_customers",
+            "step_name": "Extract Customer Data",
+            "step_type": "extract",
+            "depends_on": [
+                "validate_files"
+            ],
+            "executor_class": "src.ingestion.csv_extractor.CSVExtractor",
+            "parameters": {
+                "table_config_id": "raw.crm.customers",
+                "file_pattern": "customers.csv",
+                "csv_options": {
+                    "header": true,
+                    "delimiter": ",",
+                    "quote": "\"",
+                    "escape": "\\",
+                    "encoding": "utf-8"
+                }
+            },
+            "spark_config": {
+                "spark.sql.adaptive.enabled": "true",
+                "spark.sql.adaptive.coalescePartitions.enabled": "true"
+            },
+            "memory_gb": 4,
+            "cpu_cores": 2,
+            "retry_count": 3,
+            "retry_delay_minutes": 5,
+            "sla_minutes": 45,
+            "alert_on_failure": true
+        },
+        {
+            "step_id": "load_customers_raw",
+            "step_name": "Load Customer Data to Raw Layer",
+            "step_type": "load",
+            "depends_on": [
+                "extract_customers"
+            ],
+            "executor_class": "src.ingestion.raw_loader.RawDataLoader",
+            "parameters": {
+                "target_table": "lakehouse.raw.crm_customers",
+                "write_mode": "append",
+                "enable_scd": true
+            },
+            "spark_config": {
+                "spark.sql.adaptive.enabled": "true",
+                "spark.serializer": "org.apache.spark.serializer.KryoSerializer"
+            },
+            "memory_gb": 8,
+            "cpu_cores": 4,
+            "retry_count": 3,
+            "retry_delay_minutes": 10,
+            "sla_minutes": 60,
+            "alert_on_failure": true
+        },
+        {
+            "step_id": "validate_raw_data",
+            "step_name": "Validate Raw Data Quality",
+            "step_type": "validate",
+            "depends_on": [
+                "load_customers_raw"
+            ],
+            "executor_class": "src.quality.data_validator.DataQualityValidator",
+            "parameters": {
+                "table_name": "lakehouse.raw.crm_customers",
+                "validation_config_id": "raw.crm.customers",
+                "fail_on_error": false,
+                "generate_report": true
+            },
+            "retry_count": 2,
+            "retry_delay_minutes": 5,
+            "continue_on_failure": true,
+            "sla_minutes": 30,
+            "alert_on_failure": true
+        },
+        {
+            "step_id": "notify_completion",
+            "step_name": "Notify Pipeline Completion",
+            "step_type": "notify",
+            "depends_on": [
+                "validate_raw_data"
+            ],
+            "executor_class": "src.common.monitoring.notification_service.NotificationService",
+            "parameters": {
+                "notification_type": "success",
+                "channels": [
+                    "email",
+                    "slack"
+                ],
+                "include_metrics": true
+            },
+            "retry_count": 1,
+            "retry_delay_minutes": 2,
+            "continue_on_failure": true,
+            "alert_on_failure": false
+        }
+    ],
+    "batch_config": {
+        "batch_id_pattern": "crm_{date}_{time}",
+        "file_patterns": [
+            {
+                "pattern": "crm_*.zip",
+                "source_path": "/data/landing/crm/",
+                "expected_count": 1,
+                "min_count": 1,
+                "max_age_hours": 24
+            }
+        ],
+        "completion_criteria": "all_files",
+        "max_wait_hours": 4
+    },
+    "schedule_cron": "0 6 * * *",
+    "timezone": "Europe/Warsaw",
+    "max_parallel_steps": 3,
+    "global_timeout_hours": 6,
+    "alert_channels": [
+        "data-team@company.com",
+        "#data-alerts"
+    ],
+    "monitoring_enabled": true,
+    "owner": "data-engineering-team",
+    "tags": [
+        "crm",
+        "daily",
+        "raw-layer",
+        "customers"
+    ]
+}
