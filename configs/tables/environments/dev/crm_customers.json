@@ -1,0 +1,54 @@
+{
+    "scd_config": {
+        "enable_scd": true,
+        "business_keys": [
+            "customer_id"
+        ],
+        "tracked_columns": [
+            "first_name",
+            "last_name",
+            "email",
+            "phone",
+            "status",
+            "credit_limit"
+        ],
+        "scd_type": 2,
+        "effective_date_column": "valid_from",
+        "end_date_column": "valid_to",
+        "current_flag_column": "is_current",
+        "hash_column": "row_hash",
+        "created_date_column": "created_date",
+        "updated_date_column": "updated_date",
+        "batch_id_column": "batch_id",
+        "source_system_column": "source_system",
+        "delete_flag_column": "is_deleted",
+        "version_column": "version",
+        "merge_on_business_key": true,
+        "handle_deletes": false,
+        "preserve_history": true,
+        "auto_end_date": true,
+        "validate_business_keys": false,
+        "enable_change_tracking": true,
+        "track_column_changes": false,
+        "enable_soft_deletes": false
+    },
+    "validation_rules": [
+        {
+            "column": "customer_id",
+            "rule_type": "not_null",
+            "severity": "WARNING"
+        },
+        {
+            "column": "email",
+            "rule_type": "regex",
+            "parameters": {
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+            },
+            "severity": "WARNING"
+        }
+    ],
+    "partition": {
+        "type": "daily",
+        "column": "created_date"
+    }
+}

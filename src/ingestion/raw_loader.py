@@ -251,10 +251,26 @@ class RawDataLoader:
             Load result metrics
         """
         try:
-            # Get SCD configuration
-            scd_config = self.table_config.scd_config
+            # Check if SCD is enabled in table configuration
+            if not self.table_config.enable_scd:
+                raise ValidationError("SCD is not enabled for this table configuration")
+            
+            # Get or create SCD configuration
+            scd_config = getattr(self.table_config, 'scd_config', None)
             if not scd_config:
-                raise ValidationError("SCD configuration not found for SCD-enabled load")
+                # Create default SCD config if not present
+                from ..common.models.scd_config import SCDConfig, SCDStrategy, HashAlgorithm
+                
+                scd_config = SCDConfig(
+                    business_keys=self.table_config.business_keys,
+                    tracked_columns=getattr(self.table_config, 'scd_columns', []),
+                    valid_from_column='valid_from',
+                    valid_to_column='valid_to',
+                    is_current_column='is_current',
+                    hash_column='row_hash',
+                    strategy=SCDStrategy.MERGE_INTO,
+                    hash_algorithm=HashAlgorithm.SHA256
+                )
             
             # Initialize SCD processor
             scd_processor = SCDProcessor(
@@ -264,15 +280,25 @@ class RawDataLoader:
                 metrics_collector=self.metrics_collector
             )
             
+            # Generate batch ID for tracking
+            batch_id = kwargs.get('batch_id', f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+            
             # Process SCD
-            scd_result = scd_processor.process_scd(df, target_table)
+            scd_metrics = scd_processor.process_scd(
+                source_df=df, 
+                target_table=target_table,
+                batch_id=batch_id,
+                processing_timestamp=kwargs.get('processing_timestamp')
+            )
             
             return {
-                'records_loaded': scd_result.get('total_records', 0),
-                'new_records': scd_result.get('new_records', 0),
-                'updated_records': scd_result.get('updated_records', 0),
-                'unchanged_records': scd_result.get('unchanged_records', 0),
-                'load_type': 'scd_type2'
+                'records_loaded': scd_metrics.source_row_count,
+                'new_records': scd_metrics.new_records,
+                'updated_records': scd_metrics.updated_records,
+                'unchanged_records': scd_metrics.unchanged_records,
+                'load_type': 'scd_type2',
+                'batch_id': batch_id,
+                'scd_metrics': scd_metrics
             }
             
         except Exception as e:

@@ -1,0 +1,88 @@
+{
+    "scd_config": {
+        "enable_scd": true,
+        "business_keys": [
+            "customer_id"
+        ],
+        "tracked_columns": [
+            "first_name",
+            "last_name",
+            "email",
+            "phone",
+            "status",
+            "credit_limit"
+        ],
+        "scd_type": 2,
+        "effective_date_column": "valid_from",
+        "end_date_column": "valid_to",
+        "current_flag_column": "is_current",
+        "hash_column": "row_hash",
+        "created_date_column": "created_date",
+        "updated_date_column": "updated_date",
+        "batch_id_column": "batch_id",
+        "source_system_column": "source_system",
+        "delete_flag_column": "is_deleted",
+        "version_column": "version",
+        "merge_on_business_key": true,
+        "handle_deletes": true,
+        "preserve_history": true,
+        "auto_end_date": true,
+        "validate_business_keys": true,
+        "enable_change_tracking": true,
+        "track_column_changes": true,
+        "enable_soft_deletes": true
+    },
+    "validation_rules": [
+        {
+            "column": "customer_id",
+            "rule_type": "not_null",
+            "severity": "CRITICAL"
+        },
+        {
+            "column": "customer_id",
+            "rule_type": "unique",
+            "severity": "CRITICAL"
+        },
+        {
+            "column": "email",
+            "rule_type": "regex",
+            "parameters": {
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+            },
+            "severity": "ERROR"
+        },
+        {
+            "column": "status",
+            "rule_type": "allowed_values",
+            "parameters": {
+                "values": [
+                    "active",
+                    "inactive",
+                    "suspended",
+                    "pending"
+                ]
+            },
+            "severity": "CRITICAL"
+        },
+        {
+            "column": "credit_limit",
+            "rule_type": "range",
+            "parameters": {
+                "min_value": 0,
+                "max_value": 100000
+            },
+            "severity": "ERROR"
+        }
+    ],
+    "partition": {
+        "type": "monthly",
+        "column": "created_date"
+    },
+    "quality_checks": {
+        "enable_profiling": true,
+        "enable_anomaly_detection": true,
+        "data_freshness_threshold_hours": 24,
+        "completeness_threshold": 0.95,
+        "uniqueness_threshold": 0.99
+    }
+}

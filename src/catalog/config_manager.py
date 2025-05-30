@@ -201,6 +201,34 @@ class FileConfigurationSource(ConfigurationSource):
                     rules.append(ValidationRule(**rule_data))
             data['validation_rules'] = rules
         
+        # Handle SCD configuration conversion
+        if data.get('enable_scd', False) and 'scd_columns' in data:
+            # Convert simplified SCD config to full SCDConfig
+            from ..common.models.scd_config import SCDConfig, SCDStrategy, HashAlgorithm
+            
+            scd_config_data = {
+                'business_keys': data.get('business_keys', []),
+                'tracked_columns': data.get('scd_columns', []),
+                'valid_from_column': 'valid_from',
+                'valid_to_column': 'valid_to', 
+                'is_current_column': 'is_current',
+                'hash_column': 'row_hash',
+                'strategy': SCDStrategy.MERGE_INTO,
+                'hash_algorithm': HashAlgorithm.SHA256,
+                'use_source_timestamp': False,
+                'default_valid_to': '9999-12-31 23:59:59',
+                'ignore_null_changes': True,
+                'case_sensitive_comparison': True,
+                'trim_strings': True,
+                'enable_clustering': True,
+                'partition_on_valid_from': True,
+                'validate_business_keys': True,
+                'allow_duplicate_business_keys': False
+            }
+            
+            # Create SCDConfig instance and add to data
+            data['scd_config'] = SCDConfig(**scd_config_data)
+        
         return TableConfig(**data)
     
     def save_table_config(self, config: TableConfig, environment: str = "default") -> bool:
