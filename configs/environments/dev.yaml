@@ -1,0 +1,26 @@
+spark:
+  app_name: "lakehouse_etl_dev"
+  master: "local[*]"
+  executor:
+    instances: 2
+    cores: 2
+    memory: "4g"
+  driver:
+    cores: 1
+    memory: "2g"
+  
+iceberg:
+  catalog_name: "lakehouse_catalog"
+  warehouse_path: "file:///tmp/warehouse"
+  
+minio:
+  endpoint: "http://localhost:9000"
+  access_key: "minioadmin"
+  secret_key: "minioadmin"
+  
+security:
+  log_level: "DEBUG"
+  
+monitoring:
+  metrics_enabled: false
+  alerts_enabled: false

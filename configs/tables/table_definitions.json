@@ -1,0 +1,26 @@
+[
+  {
+    "identifier": "raw.crm.customers",
+    "layer": "raw",
+    "source_type": "crm", 
+    "schema": {
+      "customer_id": "long",
+      "first_name": "string",
+      "last_name": "string",
+      "email": "string",
+      "created_date": "timestamp"
+    },
+    "business_keys": ["customer_id"],
+    "partition_spec": {
+      "columns": ["created_date"],
+      "partition_type": "monthly"
+    },
+    "validation_rules": [
+      {
+        "rule_type": "not_null",
+        "column": "customer_id",
+        "severity": "error"
+      }
+    ]
+  }
+]

@@ -1,0 +1,16 @@
+FROM apache/spark:3.5.0-python3
+
+# Install Python dependencies
+COPY requirements.txt /opt/requirements.txt
+RUN pip install -r /opt/requirements.txt
+
+# Copy application code
+COPY src/ /opt/lakehouse_etl/src/
+COPY configs/ /opt/lakehouse_etl/configs/
+COPY sql/ /opt/lakehouse_etl/sql/
+
+# Set environment variables
+ENV PYTHONPATH="/opt/lakehouse_etl:$PYTHONPATH"
+ENV SPARK_HOME="/opt/spark"
+
+WORKDIR /opt/lakehouse_etl
