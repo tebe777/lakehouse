@@ -15,7 +15,6 @@ tenacity==8.2.3
 cryptography==41.0.8
 azure-keyvault-secrets==4.7.0
 azure-identity==1.15.0
-psycopg2-binary==2.9.9
 pytest==7.4.3
 pytest-cov==4.1.0
 black==23.12.0

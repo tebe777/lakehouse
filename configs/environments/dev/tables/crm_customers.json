@@ -1,0 +1,136 @@
+{
+    "identifier": "raw.crm.customers",
+    "layer": "raw",
+    "source_type": "crm",
+    "table_name": "customers",
+    "description": "Customer data from CRM system - Development Environment",
+    "columns": [
+        {
+            "name": "customer_id",
+            "data_type": "long",
+            "nullable": false,
+            "description": "Unique customer identifier",
+            "business_name": "Customer ID"
+        },
+        {
+            "name": "first_name",
+            "data_type": "string",
+            "nullable": false,
+            "description": "Customer first name",
+            "business_name": "First Name"
+        },
+        {
+            "name": "last_name",
+            "data_type": "string",
+            "nullable": false,
+            "description": "Customer last name",
+            "business_name": "Last Name"
+        },
+        {
+            "name": "email",
+            "data_type": "string",
+            "nullable": true,
+            "description": "Customer email address",
+            "business_name": "Email"
+        },
+        {
+            "name": "phone",
+            "data_type": "string",
+            "nullable": true,
+            "description": "Customer phone number",
+            "business_name": "Phone"
+        },
+        {
+            "name": "created_date",
+            "data_type": "timestamp",
+            "nullable": false,
+            "description": "Customer creation date",
+            "business_name": "Created Date"
+        },
+        {
+            "name": "status",
+            "data_type": "string",
+            "nullable": false,
+            "description": "Customer status",
+            "business_name": "Status"
+        },
+        {
+            "name": "credit_limit",
+            "data_type": "double",
+            "nullable": true,
+            "description": "Customer credit limit",
+            "business_name": "Credit Limit"
+        }
+    ],
+    "business_keys": [
+        "customer_id"
+    ],
+    "partition_spec": {
+        "columns": [
+            "created_date"
+        ],
+        "partition_type": "daily"
+    },
+    "enable_scd": true,
+    "scd_columns": [
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "status",
+        "credit_limit"
+    ],
+    "validation_rules": [
+        {
+            "rule_type": "not_null",
+            "column": "customer_id",
+            "severity": "error",
+            "description": "Customer ID cannot be null"
+        },
+        {
+            "rule_type": "not_null",
+            "column": "first_name",
+            "severity": "warning",
+            "description": "First name should not be null - relaxed for dev"
+        },
+        {
+            "rule_type": "not_null",
+            "column": "last_name",
+            "severity": "warning",
+            "description": "Last name should not be null - relaxed for dev"
+        },
+        {
+            "rule_type": "regex_match",
+            "column": "email",
+            "parameters": {
+                "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+            },
+            "severity": "info",
+            "description": "Email should be in valid format - info only in dev"
+        },
+        {
+            "rule_type": "in_set",
+            "column": "status",
+            "parameters": {
+                "values": [
+                    "active",
+                    "inactive",
+                    "suspended",
+                    "pending",
+                    "test"
+                ]
+            },
+            "severity": "warning",
+            "description": "Status must be one of allowed values - includes test status for dev"
+        },
+        {
+            "rule_type": "min_value",
+            "column": "credit_limit",
+            "parameters": {
+                "min_value": -1000
+            },
+            "severity": "info",
+            "description": "Credit limit can be negative in dev environment"
+        }
+    ]
+}

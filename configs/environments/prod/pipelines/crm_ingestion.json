@@ -1,0 +1,55 @@
+{
+    "schedule": {
+        "cron": "0 1 * * *",
+        "timezone": "UTC",
+        "enabled": true
+    },
+    "target": {
+        "location": "s3a://lakehouse-prod/raw/crm/"
+    },
+    "processing": {
+        "batch_size": 50000,
+        "parallelism": 8,
+        "enable_checkpointing": true,
+        "checkpoint_interval": "2 minutes"
+    },
+    "data_quality": {
+        "enabled": true,
+        "fail_on_critical": true,
+        "fail_on_error": true,
+        "generate_report": true
+    },
+    "monitoring": {
+        "enabled": true,
+        "metrics": [
+            "records_processed",
+            "records_failed",
+            "processing_time",
+            "data_quality_score",
+            "memory_usage",
+            "cpu_usage"
+        ],
+        "alerts": [
+            {
+                "condition": "records_failed > 10",
+                "severity": "critical",
+                "notification": "pagerduty"
+            },
+            {
+                "condition": "data_quality_score < 0.98",
+                "severity": "error",
+                "notification": "slack"
+            },
+            {
+                "condition": "processing_time > 30 minutes",
+                "severity": "warning",
+                "notification": "email"
+            }
+        ]
+    },
+    "retry": {
+        "max_attempts": 5,
+        "backoff_strategy": "exponential",
+        "initial_delay": "2 minutes"
+    }
+}

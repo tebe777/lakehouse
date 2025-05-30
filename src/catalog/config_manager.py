@@ -1,5 +1,6 @@
 """
 Configuration manager for loading and managing table and pipeline configurations.
+Focused on configuration-as-code approach using files.
 """
 
 import json
@@ -8,8 +9,6 @@ from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
 from abc import ABC, abstractmethod
 import structlog
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
 
 from ..common.models.table_config import TableConfig, ColumnConfig, ValidationRule
 from ..common.models.pipeline_config import PipelineConfig
@@ -22,84 +21,135 @@ class ConfigurationSource(ABC):
     """Abstract base class for configuration sources."""
     
     @abstractmethod
-    def load_table_configs(self) -> List[TableConfig]:
+    def load_table_configs(self, environment: str = "default") -> List[TableConfig]:
         """Load table configurations."""
         pass
     
     @abstractmethod
-    def load_pipeline_configs(self) -> List[PipelineConfig]:
+    def load_pipeline_configs(self, environment: str = "default") -> List[PipelineConfig]:
         """Load pipeline configurations."""
         pass
     
     @abstractmethod
-    def save_table_config(self, config: TableConfig) -> bool:
+    def save_table_config(self, config: TableConfig, environment: str = "default") -> bool:
         """Save table configuration."""
         pass
     
     @abstractmethod
-    def save_pipeline_config(self, config: PipelineConfig) -> bool:
+    def save_pipeline_config(self, config: PipelineConfig, environment: str = "default") -> bool:
         """Save pipeline configuration."""
         pass
 
 
 class FileConfigurationSource(ConfigurationSource):
-    """Configuration source using local files."""
+    """Configuration source using local files - primary approach for config-as-code."""
     
     def __init__(self, config_dir: str):
         self.config_dir = Path(config_dir)
         self.tables_dir = self.config_dir / "tables"
         self.pipelines_dir = self.config_dir / "pipelines"
+        self.environments_dir = self.config_dir / "environments"
         self.logger = logger.bind(source="FileConfigurationSource")
         
         # Ensure directories exist
         self.tables_dir.mkdir(parents=True, exist_ok=True)
         self.pipelines_dir.mkdir(parents=True, exist_ok=True)
+        self.environments_dir.mkdir(parents=True, exist_ok=True)
     
-    def load_table_configs(self) -> List[TableConfig]:
+    def load_table_configs(self, environment: str = "default") -> List[TableConfig]:
         """Load table configurations from files."""
         configs = []
         
-        # Load from JSON files
-        for json_file in self.tables_dir.glob("*.json"):
-            try:
-                configs.extend(self._load_table_configs_from_file(json_file))
-            except Exception as e:
-                self.logger.error("Failed to load table config from file",
-                                file=str(json_file), error=str(e))
+        # Load base configurations
+        configs.extend(self._load_configs_from_directory(self.tables_dir, "table"))
         
-        # Load from YAML files
-        for yaml_file in self.tables_dir.glob("*.yaml"):
-            try:
-                configs.extend(self._load_table_configs_from_file(yaml_file))
-            except Exception as e:
-                self.logger.error("Failed to load table config from file",
-                                file=str(yaml_file), error=str(e))
+        # Load environment-specific overrides
+        env_tables_dir = self.environments_dir / environment / "tables"
+        if env_tables_dir.exists():
+            env_configs = self._load_configs_from_directory(env_tables_dir, "table")
+            configs = self._merge_environment_configs(configs, env_configs)
         
-        self.logger.info("Loaded table configurations", count=len(configs))
+        self.logger.info("Loaded table configurations", 
+                        count=len(configs), 
+                        environment=environment)
         return configs
     
-    def load_pipeline_configs(self) -> List[PipelineConfig]:
+    def load_pipeline_configs(self, environment: str = "default") -> List[PipelineConfig]:
         """Load pipeline configurations from files."""
         configs = []
         
+        # Load base configurations
+        configs.extend(self._load_configs_from_directory(self.pipelines_dir, "pipeline"))
+        
+        # Load environment-specific overrides
+        env_pipelines_dir = self.environments_dir / environment / "pipelines"
+        if env_pipelines_dir.exists():
+            env_configs = self._load_configs_from_directory(env_pipelines_dir, "pipeline")
+            configs = self._merge_environment_configs(configs, env_configs)
+        
+        self.logger.info("Loaded pipeline configurations", 
+                        count=len(configs), 
+                        environment=environment)
+        return configs
+    
+    def _load_configs_from_directory(self, directory: Path, config_type: str) -> List[Union[TableConfig, PipelineConfig]]:
+        """Load configurations from a directory."""
+        configs = []
+        
+        if not directory.exists():
+            return configs
+        
         # Load from JSON files
-        for json_file in self.pipelines_dir.glob("*.json"):
+        for json_file in directory.glob("*.json"):
             try:
-                configs.extend(self._load_pipeline_configs_from_file(json_file))
+                if config_type == "table":
+                    configs.extend(self._load_table_configs_from_file(json_file))
+                else:
+                    configs.extend(self._load_pipeline_configs_from_file(json_file))
             except Exception as e:
-                self.logger.error("Failed to load pipeline config from file",
+                self.logger.error("Failed to load config from file",
                                 file=str(json_file), error=str(e))
         
         # Load from YAML files
-        for yaml_file in self.pipelines_dir.glob("*.yaml"):
+        for yaml_file in directory.glob("*.yaml"):
             try:
-                configs.extend(self._load_pipeline_configs_from_file(yaml_file))
+                if config_type == "table":
+                    configs.extend(self._load_table_configs_from_file(yaml_file))
+                else:
+                    configs.extend(self._load_pipeline_configs_from_file(yaml_file))
             except Exception as e:
-                self.logger.error("Failed to load pipeline config from file",
+                self.logger.error("Failed to load config from file",
                                 file=str(yaml_file), error=str(e))
         
-        self.logger.info("Loaded pipeline configurations", count=len(configs))
         return configs
+    
+    def _merge_environment_configs(self, base_configs: List, env_configs: List) -> List:
+        """Merge environment-specific configurations with base configurations."""
+        # Create lookup for base configs
+        if not base_configs:
+            return env_configs
+        
+        # Determine identifier field
+        if hasattr(base_configs[0], 'identifier'):
+            id_field = 'identifier'
+        elif hasattr(base_configs[0], 'pipeline_id'):
+            id_field = 'pipeline_id'
+        else:
+            return base_configs  # Can't merge without identifier
+        
+        base_lookup = {getattr(config, id_field): config for config in base_configs}
+        
+        # Apply environment overrides
+        for env_config in env_configs:
+            config_id = getattr(env_config, id_field)
+            if config_id in base_lookup:
+                # Replace base config with environment version
+                base_lookup[config_id] = env_config
+            else:
+                # Add new environment-specific config
+                base_lookup[config_id] = env_config
+        
+        return list(base_lookup.values())
     
     def _load_table_configs_from_file(self, file_path: Path) -> List[TableConfig]:
         """Load table configurations from a single file."""
@@ -153,10 +203,17 @@ class FileConfigurationSource(ConfigurationSource):
         
         return TableConfig(**data)
     
-    def save_table_config(self, config: TableConfig) -> bool:
+    def save_table_config(self, config: TableConfig, environment: str = "default") -> bool:
         """Save table configuration to file."""
         try:
-            file_path = self.tables_dir / f"{config.identifier.replace('.', '_')}.json"
+            # Determine target directory
+            if environment == "default":
+                target_dir = self.tables_dir
+            else:
+                target_dir = self.environments_dir / environment / "tables"
+                target_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_path = target_dir / f"{config.identifier.replace('.', '_')}.json"
             
             # Convert to dict for serialization
             config_dict = config.dict()
@@ -166,18 +223,28 @@ class FileConfigurationSource(ConfigurationSource):
             
             self.logger.info("Saved table configuration", 
                            identifier=config.identifier, 
+                           environment=environment,
                            file=str(file_path))
             return True
             
         except Exception as e:
             self.logger.error("Failed to save table configuration",
-                            identifier=config.identifier, error=str(e))
+                            identifier=config.identifier, 
+                            environment=environment,
+                            error=str(e))
             return False
     
-    def save_pipeline_config(self, config: PipelineConfig) -> bool:
+    def save_pipeline_config(self, config: PipelineConfig, environment: str = "default") -> bool:
         """Save pipeline configuration to file."""
         try:
-            file_path = self.pipelines_dir / f"{config.pipeline_id}.json"
+            # Determine target directory
+            if environment == "default":
+                target_dir = self.pipelines_dir
+            else:
+                target_dir = self.environments_dir / environment / "pipelines"
+                target_dir.mkdir(parents=True, exist_ok=True)
+            
+            file_path = target_dir / f"{config.pipeline_id}.json"
             
             # Convert to dict for serialization
             config_dict = config.dict()
@@ -187,164 +254,70 @@ class FileConfigurationSource(ConfigurationSource):
             
             self.logger.info("Saved pipeline configuration", 
                            pipeline_id=config.pipeline_id, 
+                           environment=environment,
                            file=str(file_path))
             return True
             
         except Exception as e:
             self.logger.error("Failed to save pipeline configuration",
-                            pipeline_id=config.pipeline_id, error=str(e))
-            return False
-
-
-class DatabaseConfigurationSource(ConfigurationSource):
-    """Configuration source using database."""
-    
-    def __init__(self, connection_string: str):
-        self.connection_string = connection_string
-        self.engine = create_engine(connection_string)
-        self.Session = sessionmaker(bind=self.engine)
-        self.logger = logger.bind(source="DatabaseConfigurationSource")
-        
-        # Initialize database schema if needed
-        self._initialize_schema()
-    
-    def _initialize_schema(self):
-        """Initialize database schema for configuration storage."""
-        # This would create tables for storing configurations
-        # For now, we'll assume tables exist
-        pass
-    
-    def load_table_configs(self) -> List[TableConfig]:
-        """Load table configurations from database."""
-        configs = []
-        
-        try:
-            with self.engine.connect() as conn:
-                # Query table configurations
-                result = conn.execute(text("""
-                    SELECT config_data 
-                    FROM table_configurations 
-                    WHERE active = true
-                """))
-                
-                for row in result:
-                    config_data = json.loads(row.config_data)
-                    configs.append(self._parse_table_config(config_data))
-            
-            self.logger.info("Loaded table configurations from database", count=len(configs))
-            
-        except Exception as e:
-            self.logger.error("Failed to load table configurations from database", 
+                            pipeline_id=config.pipeline_id, 
+                            environment=environment,
                             error=str(e))
-        
-        return configs
-    
-    def load_pipeline_configs(self) -> List[PipelineConfig]:
-        """Load pipeline configurations from database."""
-        configs = []
-        
-        try:
-            with self.engine.connect() as conn:
-                # Query pipeline configurations
-                result = conn.execute(text("""
-                    SELECT config_data 
-                    FROM pipeline_configurations 
-                    WHERE active = true
-                """))
-                
-                for row in result:
-                    config_data = json.loads(row.config_data)
-                    configs.append(PipelineConfig(**config_data))
-            
-            self.logger.info("Loaded pipeline configurations from database", count=len(configs))
-            
-        except Exception as e:
-            self.logger.error("Failed to load pipeline configurations from database", 
-                            error=str(e))
-        
-        return configs
-    
-    def _parse_table_config(self, data: Dict[str, Any]) -> TableConfig:
-        """Parse table configuration from dictionary."""
-        # Similar to file source parsing
-        if 'columns' in data:
-            columns = []
-            for col_data in data['columns']:
-                columns.append(ColumnConfig(**col_data))
-            data['columns'] = columns
-        
-        if 'validation_rules' in data:
-            rules = []
-            for rule_data in data['validation_rules']:
-                rules.append(ValidationRule(**rule_data))
-            data['validation_rules'] = rules
-        
-        return TableConfig(**data)
-    
-    def save_table_config(self, config: TableConfig) -> bool:
-        """Save table configuration to database."""
-        try:
-            config_json = json.dumps(config.dict(), default=str)
-            
-            with self.engine.connect() as conn:
-                conn.execute(text("""
-                    INSERT INTO table_configurations (identifier, config_data, active, created_at)
-                    VALUES (:identifier, :config_data, true, NOW())
-                    ON CONFLICT (identifier) 
-                    DO UPDATE SET config_data = :config_data, updated_at = NOW()
-                """), {
-                    'identifier': config.identifier,
-                    'config_data': config_json
-                })
-                conn.commit()
-            
-            self.logger.info("Saved table configuration to database", 
-                           identifier=config.identifier)
-            return True
-            
-        except Exception as e:
-            self.logger.error("Failed to save table configuration to database",
-                            identifier=config.identifier, error=str(e))
             return False
     
-    def save_pipeline_config(self, config: PipelineConfig) -> bool:
-        """Save pipeline configuration to database."""
+    def list_environments(self) -> List[str]:
+        """List available environments."""
+        environments = ["default"]
+        
+        if self.environments_dir.exists():
+            for env_dir in self.environments_dir.iterdir():
+                if env_dir.is_dir():
+                    environments.append(env_dir.name)
+        
+        return environments
+    
+    def validate_configurations(self) -> Dict[str, List[str]]:
+        """Validate all configurations and return any errors."""
+        errors = {"table_configs": [], "pipeline_configs": []}
+        
+        # Validate table configurations
         try:
-            config_json = json.dumps(config.dict(), default=str)
-            
-            with self.engine.connect() as conn:
-                conn.execute(text("""
-                    INSERT INTO pipeline_configurations (pipeline_id, config_data, active, created_at)
-                    VALUES (:pipeline_id, :config_data, true, NOW())
-                    ON CONFLICT (pipeline_id) 
-                    DO UPDATE SET config_data = :config_data, updated_at = NOW()
-                """), {
-                    'pipeline_id': config.pipeline_id,
-                    'config_data': config_json
-                })
-                conn.commit()
-            
-            self.logger.info("Saved pipeline configuration to database", 
-                           pipeline_id=config.pipeline_id)
-            return True
-            
+            table_configs = self.load_table_configs()
+            for config in table_configs:
+                try:
+                    # Pydantic validation happens during loading
+                    pass
+                except Exception as e:
+                    errors["table_configs"].append(f"{config.identifier}: {str(e)}")
         except Exception as e:
-            self.logger.error("Failed to save pipeline configuration to database",
-                            pipeline_id=config.pipeline_id, error=str(e))
-            return False
+            errors["table_configs"].append(f"Failed to load table configs: {str(e)}")
+        
+        # Validate pipeline configurations
+        try:
+            pipeline_configs = self.load_pipeline_configs()
+            for config in pipeline_configs:
+                try:
+                    # Pydantic validation happens during loading
+                    pass
+                except Exception as e:
+                    errors["pipeline_configs"].append(f"{config.pipeline_id}: {str(e)}")
+        except Exception as e:
+            errors["pipeline_configs"].append(f"Failed to load pipeline configs: {str(e)}")
+        
+        return errors
 
 
 class ConfigurationManager:
-    """Main configuration manager that can use multiple sources."""
+    """Main configuration manager focused on file-based configuration-as-code."""
     
     def __init__(self, 
-                 primary_source: ConfigurationSource,
-                 fallback_sources: Optional[List[ConfigurationSource]] = None,
+                 config_dir: str,
+                 environment: str = "default",
                  security_manager: Optional[SecurityManager] = None):
-        self.primary_source = primary_source
-        self.fallback_sources = fallback_sources or []
+        self.config_source = FileConfigurationSource(config_dir)
+        self.environment = environment
         self.security_manager = security_manager
-        self.logger = logger.bind(manager="ConfigurationManager")
+        self.logger = logger.bind(manager="ConfigurationManager", environment=environment)
         
         # Cache for loaded configurations
         self._table_configs_cache: Optional[Dict[str, TableConfig]] = None
@@ -394,81 +367,50 @@ class ConfigurationManager:
         self._pipeline_configs_cache = None
         self.logger.info("Configuration cache refreshed")
     
+    def switch_environment(self, environment: str):
+        """Switch to a different environment."""
+        self.environment = environment
+        self.refresh_cache()
+        self.logger.info("Switched environment", new_environment=environment)
+    
+    def list_environments(self) -> List[str]:
+        """List available environments."""
+        return self.config_source.list_environments()
+    
+    def validate_all_configurations(self) -> Dict[str, List[str]]:
+        """Validate all configurations."""
+        return self.config_source.validate_configurations()
+    
     def _load_table_configs(self):
-        """Load table configurations from sources."""
+        """Load table configurations from source."""
         self._table_configs_cache = {}
         
-        # Try primary source first
         try:
-            configs = self.primary_source.load_table_configs()
+            configs = self.config_source.load_table_configs(self.environment)
             for config in configs:
                 self._table_configs_cache[config.identifier] = config
         except Exception as e:
-            self.logger.error("Failed to load from primary source", error=str(e))
-            
-            # Try fallback sources
-            for source in self.fallback_sources:
-                try:
-                    configs = source.load_table_configs()
-                    for config in configs:
-                        if config.identifier not in self._table_configs_cache:
-                            self._table_configs_cache[config.identifier] = config
-                except Exception as e:
-                    self.logger.warning("Failed to load from fallback source", error=str(e))
+            self.logger.error("Failed to load table configurations", error=str(e))
+            raise
     
     def _load_pipeline_configs(self):
-        """Load pipeline configurations from sources."""
+        """Load pipeline configurations from source."""
         self._pipeline_configs_cache = {}
         
-        # Try primary source first
         try:
-            configs = self.primary_source.load_pipeline_configs()
+            configs = self.config_source.load_pipeline_configs(self.environment)
             for config in configs:
                 self._pipeline_configs_cache[config.pipeline_id] = config
         except Exception as e:
-            self.logger.error("Failed to load pipeline configs from primary source", error=str(e))
-            
-            # Try fallback sources
-            for source in self.fallback_sources:
-                try:
-                    configs = source.load_pipeline_configs()
-                    for config in configs:
-                        if config.pipeline_id not in self._pipeline_configs_cache:
-                            self._pipeline_configs_cache[config.pipeline_id] = config
-                except Exception as e:
-                    self.logger.warning("Failed to load pipeline configs from fallback source", error=str(e))
+            self.logger.error("Failed to load pipeline configurations", error=str(e))
+            raise
     
     @classmethod
     def create_from_config(cls, config: Dict[str, Any]) -> 'ConfigurationManager':
         """Create configuration manager from configuration dictionary."""
         
-        # Create primary source
-        primary_config = config.get('primary_source', {})
-        source_type = primary_config.get('type', 'file')
-        
-        if source_type == 'file':
-            primary_source = FileConfigurationSource(
-                config_dir=primary_config.get('config_dir', './configs')
-            )
-        elif source_type == 'database':
-            primary_source = DatabaseConfigurationSource(
-                connection_string=primary_config.get('connection_string')
-            )
-        else:
-            raise ValueError(f"Unknown source type: {source_type}")
-        
-        # Create fallback sources
-        fallback_sources = []
-        for fallback_config in config.get('fallback_sources', []):
-            source_type = fallback_config.get('type')
-            if source_type == 'file':
-                fallback_sources.append(FileConfigurationSource(
-                    config_dir=fallback_config.get('config_dir')
-                ))
-            elif source_type == 'database':
-                fallback_sources.append(DatabaseConfigurationSource(
-                    connection_string=fallback_config.get('connection_string')
-                ))
+        config_dir = config.get('config_dir', './configs')
+        environment = config.get('environment', 'default')
         
         # Create security manager if configured
         security_manager = None
@@ -476,7 +418,7 @@ class ConfigurationManager:
             security_manager = SecurityManager(config['security'])
         
         return cls(
-            primary_source=primary_source,
-            fallback_sources=fallback_sources,
+            config_dir=config_dir,
+            environment=environment,
             security_manager=security_manager
         ) 

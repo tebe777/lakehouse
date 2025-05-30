@@ -1,0 +1,29 @@
+{
+    "schedule": {
+        "cron": "0 */4 * * *",
+        "timezone": "UTC",
+        "enabled": true
+    },
+    "target": {
+        "location": "s3a://lakehouse-dev/raw/crm/"
+    },
+    "processing": {
+        "batch_size": 1000,
+        "parallelism": 2,
+        "enable_checkpointing": false
+    },
+    "data_quality": {
+        "enabled": true,
+        "fail_on_critical": false,
+        "fail_on_error": false,
+        "generate_report": true
+    },
+    "monitoring": {
+        "enabled": false
+    },
+    "retry": {
+        "max_attempts": 1,
+        "backoff_strategy": "fixed",
+        "initial_delay": "30 seconds"
+    }
+}

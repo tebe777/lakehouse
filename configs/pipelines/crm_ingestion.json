@@ -1,0 +1,80 @@
+{
+    "pipeline_id": "crm_ingestion",
+    "name": "CRM Data Ingestion Pipeline",
+    "description": "Ingests customer data from CRM system into the lakehouse",
+    "version": "1.0.0",
+    "schedule": {
+        "cron": "0 2 * * *",
+        "timezone": "UTC",
+        "enabled": true
+    },
+    "source": {
+        "type": "database",
+        "connection_id": "crm_db",
+        "schema": "public",
+        "tables": [
+            "customers",
+            "orders",
+            "products"
+        ]
+    },
+    "target": {
+        "layer": "raw",
+        "namespace": "crm",
+        "format": "iceberg",
+        "location": "s3a://lakehouse/raw/crm/"
+    },
+    "processing": {
+        "batch_size": 10000,
+        "parallelism": 4,
+        "enable_checkpointing": true,
+        "checkpoint_interval": "5 minutes"
+    },
+    "data_quality": {
+        "enabled": true,
+        "fail_on_critical": true,
+        "fail_on_error": false,
+        "generate_report": true
+    },
+    "scd": {
+        "enabled": true,
+        "type": "type2",
+        "effective_date_column": "effective_date",
+        "end_date_column": "end_date",
+        "current_flag_column": "is_current"
+    },
+    "monitoring": {
+        "enabled": true,
+        "metrics": [
+            "records_processed",
+            "records_failed",
+            "processing_time",
+            "data_quality_score"
+        ],
+        "alerts": [
+            {
+                "condition": "records_failed > 100",
+                "severity": "warning",
+                "notification": "email"
+            },
+            {
+                "condition": "data_quality_score < 0.95",
+                "severity": "error",
+                "notification": "slack"
+            }
+        ]
+    },
+    "retry": {
+        "max_attempts": 3,
+        "backoff_strategy": "exponential",
+        "initial_delay": "1 minute"
+    },
+    "dependencies": [
+        "reference_data_load"
+    ],
+    "tags": [
+        "crm",
+        "customer_data",
+        "daily"
+    ]
+}
