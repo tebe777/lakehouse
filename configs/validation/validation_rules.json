@@ -1,0 +1,27 @@
+# configs/validation/validation_rules.json
+BUSINESS_RULES_CONFIG_EXAMPLE = """
+{
+  "crm": {
+    "business_rules": {
+      "total_data_volume": {
+        "type": "total_row_count_range",
+        "min_total_rows": 1000,
+        "max_total_rows": 1000000
+      },
+      "file_size_consistency": {
+        "type": "file_size_consistency",
+        "size_tolerance_percentage": 50
+      }
+    }
+  },
+  "erp": {
+    "business_rules": {
+      "daily_data_volume": {
+        "type": "total_row_count_range",
+        "min_total_rows": 5000,
+        "max_total_rows": 2000000
+      }
+    }
+  }
+}
+"""

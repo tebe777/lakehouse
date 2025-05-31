@@ -24,3 +24,25 @@ security:
 monitoring:
   metrics_enabled: false
   alerts_enabled: false
+
+input_validation:
+  max_file_size_mb: 500
+  min_file_size_bytes: 100
+  max_row_count: 10000000
+  min_row_count: 1
+  allowed_encodings: ['utf-8', 'latin1', 'cp1252']
+  max_schema_drift_percentage: 20
+  max_execution_age_days: 30
+  
+  # File naming patterns by source type
+  file_naming_patterns:
+    crm: "^crm_[a-z]+_\\d{8}\\.csv$"
+    erp: "^erp_extract_\\d{8}_\\d{6}\\.csv$"
+    finance: "^fin_[a-z_]+_\\d{4}-\\d{2}-\\d{2}\\.csv$"
+  
+  # Expected file counts by source type
+  expected_file_counts:
+    crm: 3
+    erp: 5
+    finance: 2
+

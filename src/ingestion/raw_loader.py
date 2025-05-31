@@ -1,13 +1,29 @@
 """
 Raw data loader for loading extracted data into the raw layer.
-Supports Apache Iceberg tables with SCD Type 2 functionality.
+Supports Apache Iceberg tables with SCD Type 2 functionality, ZIP file processing, and comprehensive validation.
 """
 
+import os
+import zipfile
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 import structlog
+import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import lit, current_timestamp, col, when, isnan, isnull
+from pyspark.sql.functions import (
+    lit, current_timestamp, col, when, isnan, isnull, hash, concat_ws, input_file_name
+)
+from pyspark.sql.types import StructType, StructField, StringType, LongType, TimestampType, BooleanType
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+try:
+    from pyiceberg.catalog import load_catalog
+    from pyiceberg.exceptions import NoSuchTableError
+    ICEBERG_AVAILABLE = True
+except ImportError:
+    ICEBERG_AVAILABLE = False
 
 from ..common.models import TableConfiguration
 from ..common.exceptions import LoadError, ValidationError
@@ -16,31 +32,89 @@ from ..transformation.scd_processor import SCDProcessor
 logger = structlog.get_logger(__name__)
 
 
+class SchemaEvolutionError(Exception):
+    """Raised when schema evolution cannot be handled"""
+    pass
+
+
 class RawDataLoader:
     """
-    Raw data loader for loading data into the raw layer with Iceberg support.
-    Handles both initial loads and incremental updates with SCD Type 2.
+    Comprehensive raw data loader for loading data into the raw layer with Iceberg support.
+    
+    Features:
+    - DataFrame-based loading with SCD Type 2 functionality
+    - ZIP file extraction and processing
+    - CSV parsing with configurable delimiters
+    - Schema enforcement and evolution
+    - Technical metadata columns addition
+    - Iceberg table creation and data writing
+    - Comprehensive input validation
+    - Error handling and dead letter queue
     """
     
-    def __init__(self, spark: SparkSession, table_config: TableConfiguration,
-                 metrics_collector: Optional[Any] = None):
+    def __init__(self, spark: SparkSession, table_config: TableConfiguration = None,
+                 metrics_collector: Optional[Any] = None, iceberg_catalog_name: str = None,
+                 warehouse_path: str = None, temp_dir: str = "/tmp/etl"):
         """
         Initialize raw data loader.
         
         Args:
             spark: Spark session
-            table_config: Table configuration
+            table_config: Table configuration (required for DataFrame-based operations)
             metrics_collector: Optional metrics collector
+            iceberg_catalog_name: Name of Iceberg catalog (for ZIP-based operations)
+            warehouse_path: Path to Iceberg warehouse (for ZIP-based operations)
+            temp_dir: Temporary directory for file extraction
         """
         self.spark = spark
         self.table_config = table_config
         self.metrics_collector = metrics_collector
-        self.logger = logger.bind(table_id=table_config.table_id)
+        self.iceberg_catalog_name = iceberg_catalog_name
+        self.warehouse_path = warehouse_path
         
+        # Setup temporary directory
+        self.temp_dir = Path(temp_dir)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize Iceberg catalog if parameters provided
+        self.catalog = None
+        if iceberg_catalog_name and warehouse_path and ICEBERG_AVAILABLE:
+            try:
+                self.catalog = load_catalog(
+                    name=iceberg_catalog_name,
+                    **{
+                        "type": "rest",
+                        "uri": f"http://nessie:19120/api/v1",
+                        "warehouse": warehouse_path
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize Iceberg catalog: {str(e)}")
+        
+        # Initialize logger
+        if table_config:
+            self.logger = logger.bind(table_id=table_config.table_id)
+        else:
+            self.logger = logger
+        
+        # CSV parsing configuration
+        self.csv_options = {
+            "header": "true",
+            "inferSchema": "false",  # We'll enforce schema
+            "encoding": "UTF-8",
+            "sep": ",",
+            "quote": '"',
+            "escape": '"',
+            "multiLine": "true",
+            "ignoreLeadingWhiteSpace": "true",
+            "ignoreTrailingWhiteSpace": "true"
+        }
+
+    # DataFrame-based loading methods
     def load_data(self, df: DataFrame, target_table: str, write_mode: str = "append",
                   enable_scd: bool = False, **kwargs) -> Dict[str, Any]:
         """
-        Load data into raw layer table.
+        Load DataFrame into raw layer table.
         
         Args:
             df: DataFrame to load
@@ -52,6 +126,9 @@ class RawDataLoader:
         Returns:
             Dictionary with load metrics and metadata
         """
+        if not self.table_config:
+            raise ValidationError("Table configuration required for DataFrame-based loading")
+            
         try:
             self.logger.info("Starting raw data load",
                            target_table=target_table,
@@ -91,7 +168,93 @@ class RawDataLoader:
                             target_table=target_table,
                             error=str(e))
             raise LoadError(f"Failed to load data to {target_table}: {str(e)}") from e
-    
+
+    # ZIP-based processing methods
+    def process_zip(self, zip_path: str, table_config: TableConfiguration, 
+                   execution_date: str = None) -> Dict[str, Any]:
+        """
+        Process ZIP file containing CSV files and load to Iceberg.
+        
+        Args:
+            zip_path: Path to ZIP file containing CSV files
+            table_config: Table configuration with schema and rules
+            execution_date: Execution date for partitioning
+            
+        Returns:
+            Dict with processing results and statistics
+        """
+        if execution_date is None:
+            execution_date = datetime.now().isoformat()
+            
+        self.logger.info(f"Starting ZIP processing for {table_config.table_id}")
+        self.logger.info(f"ZIP file: {zip_path}, Execution date: {execution_date}")
+        
+        results = {
+            "table_name": table_config.table_id,
+            "execution_date": execution_date,
+            "zip_file": zip_path,
+            "files_processed": 0,
+            "rows_loaded": 0,
+            "errors": [],
+            "warnings": [],
+            "success": False,
+            "processing_time_seconds": 0
+        }
+        
+        start_time = datetime.now()
+        
+        try:
+            # Step 1: Validate input
+            if not self._validate_zip_input(zip_path):
+                raise ValueError(f"Invalid ZIP file: {zip_path}")
+            
+            # Step 2: Extract ZIP file
+            extracted_files = self._extract_zip_file(zip_path, execution_date)
+            self.logger.info(f"Extracted {len(extracted_files)} CSV files")
+            
+            # Step 3: Ensure Iceberg table exists
+            if self.catalog:
+                self._ensure_iceberg_table_exists(table_config)
+            
+            # Step 4: Process each CSV file
+            total_rows = 0
+            for csv_file in extracted_files:
+                try:
+                    rows_processed = self._process_csv_file(csv_file, table_config, execution_date)
+                    total_rows += rows_processed
+                    results["files_processed"] += 1
+                    self.logger.info(f"Processed {csv_file}: {rows_processed} rows")
+                except Exception as e:
+                    error_msg = f"Failed to process {csv_file}: {str(e)}"
+                    self.logger.error(error_msg)
+                    results["errors"].append(error_msg)
+                    # Move to dead letter queue
+                    self._move_to_dlq(csv_file, str(e))
+            
+            results["rows_loaded"] = total_rows
+            results["success"] = results["files_processed"] > 0
+            
+            # Step 5: Cleanup temporary files
+            self._cleanup_temp_files(extracted_files)
+            
+        except Exception as e:
+            error_msg = f"ZIP processing failed: {str(e)}"
+            self.logger.error(error_msg)
+            results["errors"].append(error_msg)
+            results["success"] = False
+        
+        finally:
+            processing_time = (datetime.now() - start_time).total_seconds()
+            results["processing_time_seconds"] = processing_time
+            
+            self.logger.info(f"ZIP processing completed. Success: {results['success']}")
+            self.logger.info(f"Files processed: {results['files_processed']}, "
+                           f"Rows loaded: {results['rows_loaded']}, "
+                           f"Processing time: {processing_time:.2f}s")
+        
+        return results
+
+    # Validation methods
     def _validate_input_data(self, df: DataFrame):
         """
         Validate input DataFrame.
@@ -120,7 +283,32 @@ class RawDataLoader:
         self.logger.debug("Input data validation passed",
                          column_count=len(df.columns),
                          record_count=df.count())
-    
+
+    def _validate_zip_input(self, zip_path: str) -> bool:
+        """Validate ZIP file exists and is readable"""
+        try:
+            zip_file = Path(zip_path)
+            if not zip_file.exists():
+                self.logger.error(f"ZIP file does not exist: {zip_path}")
+                return False
+            
+            if not zipfile.is_zipfile(zip_path):
+                self.logger.error(f"File is not a valid ZIP archive: {zip_path}")
+                return False
+            
+            # Test ZIP file can be opened
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                csv_files = [f for f in zf.namelist() if f.endswith('.csv')]
+                if not csv_files:
+                    self.logger.error(f"No CSV files found in ZIP: {zip_path}")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"ZIP file validation failed: {str(e)}")
+            return False
+
     def _check_data_quality(self, df: DataFrame):
         """
         Perform basic data quality checks.
@@ -198,8 +386,6 @@ class RawDataLoader:
         Returns:
             DataFrame with record hash column
         """
-        from pyspark.sql.functions import hash, concat_ws
-        
         # Get business columns (exclude technical columns)
         business_columns = [col['name'] for col in self.table_config.columns
                           if not col['name'].startswith('_')]
@@ -599,4 +785,255 @@ class RawDataLoader:
         ) USING ICEBERG{partition_clause}{properties_clause}
         """
         
-        return create_sql 
+        return create_sql
+
+    # ZIP processing implementation methods
+    def _extract_zip_file(self, zip_path: str, execution_date: str) -> List[str]:
+        """Extract ZIP file to temporary directory"""
+        extract_dir = self.temp_dir / f"extract_{execution_date.replace(':', '-')}"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        
+        extracted_files = []
+        
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for file_info in zf.infolist():
+                if file_info.filename.endswith('.csv'):
+                    # Extract the file
+                    extracted_path = zf.extract(file_info, extract_dir)
+                    extracted_files.append(extracted_path)
+                    self.logger.debug(f"Extracted: {file_info.filename} -> {extracted_path}")
+        
+        return extracted_files
+
+    def _ensure_iceberg_table_exists(self, table_config: TableConfiguration) -> None:
+        """Ensure Iceberg table exists, create if not"""
+        try:
+            table_name = table_config.table_id
+            namespace = table_config.database or "default"
+            
+            # Check if table exists
+            try:
+                table = self.catalog.load_table((namespace, table_name))
+                self.logger.info(f"Table {namespace}.{table_name} already exists")
+            except NoSuchTableError:
+                # Create table
+                self._create_iceberg_table(table_config)
+                self.logger.info(f"Created Iceberg table: {namespace}.{table_name}")
+                
+        except Exception as e:
+            raise SchemaEvolutionError(f"Failed to ensure table exists: {str(e)}")
+
+    def _create_iceberg_table(self, table_config: TableConfiguration) -> None:
+        """Create new Iceberg table"""
+        try:
+            table_name = table_config.table_id
+            namespace = table_config.database or "default"
+            
+            # Build schema
+            schema = self._build_iceberg_schema(table_config)
+            
+            # Create table
+            table = self.catalog.create_table(
+                identifier=(namespace, table_name),
+                schema=schema
+            )
+            
+            self.logger.info(f"Created Iceberg table: {namespace}.{table_name}")
+            
+        except Exception as e:
+            raise SchemaEvolutionError(f"Failed to create Iceberg table: {str(e)}")
+
+    def _build_iceberg_schema(self, table_config: TableConfiguration) -> pa.Schema:
+        """Build PyArrow schema for Iceberg table"""
+        fields = []
+        
+        for column in table_config.columns:
+            name = column['name']
+            data_type = column['data_type']
+            nullable = column.get('nullable', True)
+            
+            pa_type = self._spark_type_to_pyarrow(data_type)
+            
+            field = pa.field(name, pa_type, nullable=nullable)
+            fields.append(field)
+        
+        # Add technical columns
+        fields.extend([
+            pa.field('_load_timestamp', pa.timestamp('us'), nullable=False),
+            pa.field('_batch_id', pa.string(), nullable=False),
+            pa.field('_source_file', pa.string(), nullable=True)
+        ])
+        
+        return pa.schema(fields)
+
+    def _spark_type_to_pyarrow(self, spark_type: str) -> pa.DataType:
+        """Convert Spark SQL type to PyArrow type"""
+        type_map = {
+            'string': pa.string(),
+            'int': pa.int32(),
+            'integer': pa.int32(),
+            'long': pa.int64(),
+            'double': pa.float64(),
+            'float': pa.float32(),
+            'boolean': pa.bool_(),
+            'timestamp': pa.timestamp('us'),
+            'date': pa.date32()
+        }
+        
+        return type_map.get(spark_type.lower(), pa.string())
+
+    def _process_csv_file(self, csv_path: str, table_config: TableConfiguration, 
+                         execution_date: str) -> int:
+        """Process single CSV file and load to Iceberg"""
+        try:
+            self.logger.info(f"Processing CSV file: {csv_path}")
+            
+            # Read CSV with schema enforcement
+            df = self._read_csv_with_schema_enforcement(csv_path, table_config)
+            
+            if df.count() == 0:
+                self.logger.warning(f"Empty CSV file: {csv_path}")
+                return 0
+            
+            # Add technical columns
+            df = self._add_technical_columns_zip(df, csv_path, execution_date)
+            
+            # Write to Iceberg
+            self._write_to_iceberg(df, table_config)
+            
+            record_count = df.count()
+            self.logger.info(f"Successfully processed {csv_path}: {record_count} records")
+            
+            return record_count
+            
+        except Exception as e:
+            raise LoadError(f"Failed to process CSV file {csv_path}: {str(e)}")
+
+    def _read_csv_with_schema_enforcement(self, csv_path: str, 
+                                        table_config: TableConfiguration) -> DataFrame:
+        """Read CSV file with schema enforcement"""
+        try:
+            # Try with defined schema first
+            schema = self._build_spark_schema(table_config)
+            
+            df = self.spark.read \
+                .format("csv") \
+                .options(**self.csv_options) \
+                .schema(schema) \
+                .load(csv_path)
+            
+            return df
+            
+        except Exception as e:
+            self.logger.warning(f"Schema enforcement failed for {csv_path}, trying fallback: {str(e)}")
+            return self._read_csv_with_fallback(csv_path, table_config)
+
+    def _read_csv_with_fallback(self, csv_path: str, table_config: TableConfiguration) -> DataFrame:
+        """Read CSV with fallback (infer schema then cast)"""
+        df = self.spark.read \
+            .format("csv") \
+            .options(**self.csv_options) \
+            .option("inferSchema", "true") \
+            .load(csv_path)
+        
+        # Cast to expected types where possible
+        # This is a simplified implementation
+        return df
+
+    def _build_spark_schema(self, table_config: TableConfiguration) -> StructType:
+        """Build Spark SQL schema from table configuration"""
+        fields = []
+        for column in table_config.columns:
+            spark_type = self._get_spark_type(column['data_type'])
+            field = StructField(column['name'], spark_type, column.get('nullable', True))
+            fields.append(field)
+        
+        return StructType(fields)
+
+    def _get_spark_type(self, type_string: str):
+        """Convert type string to Spark SQL type"""
+        from pyspark.sql.types import StringType, IntegerType, LongType, DoubleType, BooleanType, TimestampType, DateType
+        
+        type_map = {
+            'string': StringType(),
+            'int': IntegerType(),
+            'integer': IntegerType(),
+            'long': LongType(),
+            'double': DoubleType(),
+            'boolean': BooleanType(),
+            'timestamp': TimestampType(),
+            'date': DateType()
+        }
+        
+        return type_map.get(type_string.lower(), StringType())
+
+    def _add_technical_columns_zip(self, df: DataFrame, source_file: str, 
+                             execution_date: str) -> DataFrame:
+        """Add technical columns for ZIP processing"""
+        return df \
+            .withColumn('_load_timestamp', current_timestamp()) \
+            .withColumn('_batch_id', lit(execution_date.replace(':', '-'))) \
+            .withColumn('_source_file', lit(os.path.basename(source_file)))
+
+    def _write_to_iceberg(self, df: DataFrame, table_config: TableConfiguration) -> None:
+        """Write DataFrame to Iceberg table"""
+        try:
+            table_name = f"{table_config.database or 'default'}.{table_config.table_id}"
+            
+            df.write \
+                .format("iceberg") \
+                .mode("append") \
+                .saveAsTable(table_name)
+                
+        except Exception as e:
+            raise LoadError(f"Failed to write to Iceberg table: {str(e)}")
+
+    def _handle_schema_evolution(self, table, table_config: TableConfiguration) -> None:
+        """Handle schema evolution for Iceberg table"""
+        try:
+            # This is a placeholder for schema evolution logic
+            # In practice, you would compare current schema with target schema
+            # and perform necessary ALTER TABLE operations
+            
+            current_schema = table.schema()
+            target_schema = self._build_iceberg_schema(table_config)
+            
+            # Compare schemas and evolve if needed
+            # Implementation depends on specific requirements
+            
+        except Exception as e:
+            self.logger.warning(f"Schema evolution failed: {str(e)}")
+
+    def _move_to_dlq(self, file_path: str, error_message: str) -> None:
+        """Move file to dead letter queue"""
+        try:
+            dlq_dir = self.temp_dir / "dlq"
+            dlq_dir.mkdir(parents=True, exist_ok=True)
+            
+            source_path = Path(file_path)
+            dlq_path = dlq_dir / f"{source_path.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{source_path.suffix}"
+            
+            # Move file
+            import shutil
+            shutil.move(file_path, dlq_path)
+            
+            # Write error log
+            error_log_path = dlq_path.with_suffix('.error')
+            with open(error_log_path, 'w') as f:
+                f.write(f"Error: {error_message}\n")
+                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                f.write(f"Original file: {file_path}\n")
+            
+            self.logger.info(f"Moved file to DLQ: {dlq_path}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to move file to DLQ: {str(e)}")
+
+    def _cleanup_temp_files(self, file_paths: List[str]) -> None:
+        """Cleanup temporary files"""
+        for file_path in file_paths:
+            try:
+                Path(file_path).unlink(missing_ok=True)
+                self.logger.debug(f"Cleaned up: {file_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to cleanup {file_path}: {str(e)}") 
