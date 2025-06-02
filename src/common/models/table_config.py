@@ -83,6 +83,71 @@ class PartitionSpec(BaseModel):
         return v
 
 
+class IcebergProperties(BaseModel):
+    """Iceberg table properties configuration."""
+    
+    # Format and compatibility
+    format_version: str = Field("2", description="Iceberg format version")
+    
+    # Write performance
+    write_delete_mode: str = Field("merge-on-read", description="Delete operation mode")
+    write_update_mode: str = Field("merge-on-read", description="Update operation mode") 
+    write_merge_mode: str = Field("merge-on-read", description="Merge operation mode")
+    write_target_file_size_bytes: int = Field(134217728, description="Target file size (128MB default)")
+    
+    # Compaction and optimization
+    commit_retry_num_retries: int = Field(4, description="Number of commit retries")
+    commit_retry_min_wait_ms: int = Field(100, description="Min wait between retries")
+    commit_retry_max_wait_ms: int = Field(60000, description="Max wait between retries")
+    
+    # Data lifecycle
+    history_expire_min_snapshots_to_keep: int = Field(1, description="Min snapshots to keep")
+    history_expire_max_snapshot_age_ms: int = Field(432000000, description="Max snapshot age (5 days)")
+    
+    # Metadata optimization  
+    metadata_delete_after_commit_enabled: bool = Field(True, description="Delete metadata after commit")
+    metadata_previous_versions_max: int = Field(100, description="Max previous metadata versions")
+    
+    # Performance optimization
+    split_size: int = Field(134217728, description="Split size for reading (128MB)")
+    split_lookback: int = Field(10, description="Lookback for split planning")
+    split_open_file_cost: int = Field(4194304, description="Cost of opening file (4MB)")
+    
+    # Security and compliance  
+    encryption_key_id: Optional[str] = Field(None, description="Encryption key ID")
+    
+    # Custom properties
+    custom_properties: Dict[str, str] = Field(default_factory=dict, description="Custom table properties")
+    
+    def to_spark_properties(self) -> Dict[str, str]:
+        """Convert to Spark table properties format."""
+        props = {
+            "format-version": self.format_version,
+            "write.delete.mode": self.write_delete_mode,
+            "write.update.mode": self.write_update_mode,
+            "write.merge.mode": self.write_merge_mode,
+            "write.target-file-size-bytes": str(self.write_target_file_size_bytes),
+            "commit.retry.num-retries": str(self.commit_retry_num_retries),
+            "commit.retry.min-wait-ms": str(self.commit_retry_min_wait_ms),
+            "commit.retry.max-wait-ms": str(self.commit_retry_max_wait_ms),
+            "history.expire.min-snapshots-to-keep": str(self.history_expire_min_snapshots_to_keep),
+            "history.expire.max-snapshot-age-ms": str(self.history_expire_max_snapshot_age_ms),
+            "metadata.delete-after-commit.enabled": str(self.metadata_delete_after_commit_enabled).lower(),
+            "metadata.previous-versions.max": str(self.metadata_previous_versions_max),
+            "read.split.target-size": str(self.split_size),
+            "read.split.planning-lookback": str(self.split_lookback),
+            "read.split.open-file-cost": str(self.split_open_file_cost)
+        }
+        
+        if self.encryption_key_id:
+            props["encryption.key-id"] = self.encryption_key_id
+            
+        # Add custom properties
+        props.update(self.custom_properties)
+        
+        return props
+
+
 class TableConfig(BaseModel):
     """Complete table configuration."""
     identifier: str = Field(..., description="Full table identifier (layer.source.table)")
@@ -104,6 +169,9 @@ class TableConfig(BaseModel):
     
     # Validation rules
     validation_rules: List[ValidationRule] = Field(default_factory=list, description="Validation rules")
+    
+    # Iceberg properties
+    iceberg_properties: IcebergProperties = Field(default_factory=IcebergProperties, description="Iceberg table properties")
     
     # Technical columns (auto-added)
     technical_columns: Dict[str, str] = Field(

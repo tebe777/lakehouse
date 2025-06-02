@@ -1,0 +1,37 @@
+{
+    "identifier": "raw.demo.enhanced_validation_example",
+    "schema": {
+        "customer_id": "bigint",
+        "first_name": "string",
+        "last_name": "string",
+        "email": "string",
+        "registration_date": "date",
+        "is_active": "boolean",
+        "last_login": "timestamp"
+    },
+    "key_columns": [
+        "customer_id"
+    ],
+    "validation": {
+        "null_check": [
+            "customer_id",
+            "first_name",
+            "last_name"
+        ],
+        "date_range": {
+            "registration_date": {
+                "from": "2020-01-01",
+                "to": "2030-12-31"
+            },
+            "last_login": {
+                "from": "2023-01-01T00:00:00",
+                "to": "2030-12-31T23:59:59"
+            }
+        }
+    },
+    "partition_spec": {
+        "partition_type": "daily",
+        "partition_column": "registration_date"
+    },
+    "group": "demo_enhanced"
+}

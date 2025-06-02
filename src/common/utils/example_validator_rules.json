@@ -1,0 +1,6 @@
+{
+  "null_check": ["colA", "colB"],
+  "date_range": {
+    "date_col": {"from": "2020-01-01", "to": "2030-12-31"}
+  }
+}

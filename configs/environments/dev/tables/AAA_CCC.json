@@ -1,0 +1,27 @@
+{
+  "identifier": "bronze.AAA_CCC",
+  "schema": {
+    "TYP_ROZL": "string",
+    "WER_ROZL": "string",
+    "NR_ROZL": "string",
+    "DOBA": "date",
+    "UDT_UTW": "timestamp",
+    "UDT_DO": "timestamp",
+    "ZIARNO_C": "string",
+    "RD_EN_NRD": "double",
+    "RD_EN_PB": "double",
+    "RD_EN_PW": "double",
+    "RD_EN_KN": "double",
+    "RD_EN_NEN": "double",
+    "RD_EN_NENA": "double"
+  },
+  "key_columns": ["NR_ROZL", "UDT_UTW"],
+  "validation": {
+    "null_check": ["TYP_ROZL", "NR_ROZL", "UDT_UTW"],
+    "date_range": {
+      "DOBA": {"from": "2020-01-01", "to": "2030-12-31"}
+    }
+  },
+  "partition_spec": { "type": "months", "column": "DOBA" },
+  "group": "cenyrynkene"
+}

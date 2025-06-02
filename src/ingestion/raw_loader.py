@@ -723,7 +723,7 @@ class RawDataLoader:
     
     def _build_create_table_sql(self, target_table: str) -> str:
         """
-        Build CREATE TABLE SQL statement.
+        Build CREATE TABLE SQL statement with comprehensive Iceberg properties.
         
         Args:
             target_table: Target table name
@@ -769,13 +769,21 @@ class RawDataLoader:
             partition_columns = partition_spec['columns']
             partition_clause = f"\nPARTITIONED BY ({', '.join(partition_columns)})"
         
-        # Build table properties
-        properties = [
-            "'format-version' = '2'",
-            "'write.delete.mode' = 'merge-on-read'",
-            "'write.update.mode' = 'merge-on-read'",
-            "'write.merge.mode' = 'merge-on-read'"
-        ]
+        # Build table properties from configuration
+        if hasattr(self.table_config, 'iceberg_properties'):
+            # Use configured Iceberg properties
+            iceberg_props = self.table_config.iceberg_properties.to_spark_properties()
+            properties = [f"'{k}' = '{v}'" for k, v in iceberg_props.items()]
+        else:
+            # Fallback to default properties
+            properties = [
+                "'format-version' = '2'",
+                "'write.delete.mode' = 'merge-on-read'",
+                "'write.update.mode' = 'merge-on-read'",
+                "'write.merge.mode' = 'merge-on-read'",
+                "'write.target-file-size-bytes' = '134217728'",
+                "'history.expire.max-snapshot-age-ms' = '432000000'"
+            ]
         
         properties_clause = f"\nTBLPROPERTIES (\n    {','.join(properties)}\n)"
         
